@@ -1,0 +1,131 @@
+function captureCommonAccountCredits_Latest() {
+  try {
+    const debugMode = true; // ⬅️ Set to false to disable logs
+
+    const startTime = new Date();
+    if (debugMode) Logger.log("🔄 Script started at " + startTime.toLocaleString());
+
+    const includeReadEmails = true;
+    const searchQuery = includeReadEmails
+      ? 'from:(alerts@hdfcbank.net OR noreply@hdfcbank.com)'
+      : 'from:(alerts@hdfcbank.net OR noreply@hdfcbank.com) is:unread';
+
+    const threads = GmailApp.search(searchQuery);
+    if (debugMode) Logger.log("📬 Found " + threads.length + " threads");
+    if (threads.length === 0) return;
+
+    threads.sort((a, b) => b.getLastMessageDate() - a.getLastMessageDate());
+
+    // Replace with your actual Google Sheet ID
+    const ss = SpreadsheetApp.openById('YOUR-SPREADSHEET-ID-HERE');
+    const sheet = ss.getSheetByName('Common account');
+    if (!sheet) throw new Error("Sheet named 'Common account' not found.");
+
+    const unmatchedSheet = ss.getSheetByName('Unmatched Emails') || ss.insertSheet('Unmatched Emails');
+    if (unmatchedSheet.getLastRow() === 0) {
+      unmatchedSheet.appendRow(['Message ID', 'From', 'Subject', 'Date', 'Body']);
+    }
+
+    const logSheet = ss.getSheetByName('Processing Log') || ss.insertSheet('Processing Log');
+    if (logSheet.getLastRow() === 0) {
+      logSheet.appendRow(['Execution Started', new Date().toLocaleString()]);
+      logSheet.appendRow(['Message ID', 'Date', 'From', 'Subject', 'Status', 'Notes']);
+    } else {
+      logSheet.appendRow(['Execution Started', new Date().toLocaleString()]);
+    }
+
+    const existingData = sheet.getDataRange().getValues();
+    const existingMessageIds = new Set(existingData.slice(1).map(row => row[0]));
+
+    const regex = /Rs\. ?([\d,]+\.\d{2})[^]*?by\s+VPA\s+([\w.\-@]+)\s+([A-Z\s]+?)\s+on\s+(\d{2}-\d{2}-\d{2})[^]*?reference number is\s+(\d+)/i;
+
+    const maxMessages = 50;
+    let processedCount = 0;
+
+    outerLoop:
+    for (let i = 0; i < threads.length; i++) {
+      const messages = threads[i].getMessages();
+
+      for (let j = 0; j < messages.length; j++) {
+        if (processedCount >= maxMessages) break outerLoop;
+
+        const message = messages[j];
+        const messageId = message.getId();
+        const from = message.getFrom();
+        const subject = message.getSubject();
+        const emailDate = message.getDate();
+        const rawBody = message.getPlainBody();
+        const body = rawBody.replace(/[\r\n]+/g, ' ').replace(/\u00A0/g, ' ');
+
+        if (debugMode) {
+          Logger.log("🧪 Message ID: " + messageId);
+          Logger.log("📩 Subject: " + subject);
+          Logger.log("🔎 RAW BODY:\n" + rawBody);
+          Logger.log("🔎 CLEANED BODY:\n" + body);
+        }
+
+        let status = '';
+        let notes = '';
+
+        if (existingMessageIds.has(messageId)) {
+          status = '⏭️ Duplicate';
+          notes = 'Already processed';
+        } else if (!body.includes('XXXX')) { // Replace 'XXXX' with partial account check or remove
+          unmatchedSheet.appendRow([messageId, from, subject, emailDate, rawBody]);
+          status = '⏩ Skipped (account check)';
+          notes = 'Account number not found';
+        } else {
+          const match = body.match(regex);
+          if (match) {
+            const amount = match[1].replace(/,/g, '');
+            const upiId = match[2];
+            const name = match[3].replace(/\s+/g, ' ').trim();
+            const dateStr = match[4];
+            const timeStr = Utilities.formatDate(emailDate, Session.getScriptTimeZone(), 'HH:mm:ss');
+            const reference = match[5];
+
+            sheet.appendRow([messageId, amount, name, upiId, dateStr, timeStr, reference]);
+            existingMessageIds.add(messageId);
+            status = '✅ Added';
+            notes = `Amount: ${amount}, Name: ${name}, UPI: ${upiId}, Date: ${dateStr}, Ref: ${reference}`;
+
+            if (debugMode) {
+              Logger.log("✅ Match successful:");
+              Logger.log("Amount: " + amount);
+              Logger.log("UPI ID: " + upiId);
+              Logger.log("Name: " + name);
+              Logger.log("Date: " + dateStr);
+              Logger.log("Time: " + timeStr);
+              Logger.log("Reference: " + reference);
+            }
+          } else {
+            let diagnostics = [];
+            if (!/Rs\. ?([\d,]+\.\d{2})/i.test(body)) diagnostics.push('❌ Amount missing');
+            if (!/by\s+VPA\s+([\w.\-@]+)/i.test(body)) diagnostics.push('❌ UPI ID missing');
+            if (!/VPA\s+[\w.\-@]+\s+([A-Z\s]+?)\s+on/i.test(body)) diagnostics.push('❌ Name missing');
+            if (!/on\s+(\d{2}-\d{2}-\d{2})/i.test(body)) diagnostics.push('❌ Date missing');
+            if (!/reference number is\s+(\d+)/i.test(body)) diagnostics.push('❌ Ref number missing');
+
+            const diagnosticNote = diagnostics.length ? diagnostics.join(', ') : '❌ Full pattern mismatch';
+            unmatchedSheet.appendRow([messageId, from, subject, emailDate, rawBody]);
+            status = '❌ Regex Failed';
+            notes = diagnosticNote;
+
+            if (debugMode) Logger.log("❌ Regex failed. Diagnostics: " + diagnosticNote);
+          }
+        }
+
+        logSheet.appendRow([messageId, emailDate, from, subject, status, notes]);
+        processedCount++;
+      }
+
+      threads[i].markRead();
+    }
+
+    const endTime = new Date();
+    logSheet.appendRow(['Execution Ended', endTime.toLocaleString()]);
+    if (debugMode) Logger.log(`✅ Script completed at ${endTime.toLocaleString()}. Processed ${processedCount} messages.`);
+  } catch (e) {
+    Logger.log("❗ Error: " + e.toString());
+  }
+}
