@@ -1,0 +1,72 @@
+function reconcileInfiniaAndCommonAccount() {
+  const DATE_TOLERANCE_DAYS = 3;
+  const AMOUNT_TOLERANCE = 1.0; // Adjust if you want stricter/looser matching
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ccSheet = ss.getSheetByName("Infinia");
+  const saSheet = ss.getSheetByName("Common account");
+
+  const ccData = ccSheet.getDataRange().getValues();
+  const saData = saSheet.getDataRange().getValues();
+
+  const ccHeader = ccData[0];
+  const saHeader = saData[0];
+
+  const ccAmountIdx = ccHeader.indexOf("Amount");
+  const saAmountIdx = saHeader.indexOf("Amount");
+
+  const ccDateIdx = ccHeader.indexOf("Date");
+  const saDateIdx = saHeader.indexOf("Date");
+
+  const ccReconIdx = addColumnIfMissing(ccSheet, ccHeader, "Reconciliation ID");
+  const saReconIdx = addColumnIfMissing(saSheet, saHeader, "Reconciliation ID");
+
+  let saMatched = new Array(saData.length).fill(false);
+  let reconCounter = 1;
+
+  for (let i = 1; i < ccData.length; i++) {
+    const ccAmount = parseFloat(ccData[i][ccAmountIdx]);
+    const ccDate = parseDate(ccData[i][ccDateIdx]);
+    if (!ccDate || ccData[i][ccReconIdx]) continue;
+
+    for (let j = 1; j < saData.length; j++) {
+      const saAmount = parseFloat(saData[j][saAmountIdx]);
+      const saDate = parseDate(saData[j][saDateIdx]);
+      if (!saDate || saData[j][saReconIdx] || saMatched[j]) continue;
+
+      const amountDiff = Math.abs(ccAmount - saAmount);
+      const dateDiff = Math.abs(daysBetween(ccDate, saDate));
+
+      if (amountDiff <= AMOUNT_TOLERANCE && dateDiff <= DATE_TOLERANCE_DAYS) {
+        const reconID = `RECON-${String(reconCounter).padStart(3, '0')}`;
+        ccSheet.getRange(i + 1, ccReconIdx + 1).setValue(reconID);
+        saSheet.getRange(j + 1, saReconIdx + 1).setValue(reconID);
+        saMatched[j] = true;
+        reconCounter++;
+        break;
+      }
+    }
+  }
+}
+
+function addColumnIfMissing(sheet, header, columnName) {
+  let idx = header.indexOf(columnName);
+  if (idx === -1) {
+    sheet.getRange(1, header.length + 1).setValue(columnName);
+    return header.length;
+  }
+  return idx;
+}
+
+function parseDate(value) {
+  if (value instanceof Date) return value;
+  if (typeof value === "string") {
+    let parsed = new Date(value);
+    return isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+function daysBetween(d1, d2) {
+  return Math.floor((d2 - d1) / (1000 * 60 * 60 * 24));
+}
