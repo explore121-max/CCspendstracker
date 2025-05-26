@@ -1,0 +1,92 @@
+function captureHDFCCardSpends() {
+  try {
+    Logger.log("Starting captureHDFCCardSpends");
+
+    // Set a cap on the number of threads to process (100 threads)
+    var maxThreads = 20;
+
+    // Fetch all messages from HDFC credit card email addresses
+    var threads = GmailApp.search('from:(alerts@hdfcbank.net OR noreply@hdfcbank.com)');
+    Logger.log("Found " + threads.length + " threads");
+
+    // If there are more than 100 threads, limit it to 100
+    var threadsToProcess = threads.slice(0, maxThreads);
+    Logger.log("Processing " + threadsToProcess.length + " threads");
+
+    var sheet = SpreadsheetApp.openById('1Cs9P5ZjGo-JTZE8nDAyL68OyVIvYpl5EIAt069Y9kBI').getSheetByName('CC processing log');
+    if (!sheet) {
+      throw new Error("Sheet named 'CC processing log' not found.");
+    }
+
+    // Load and parse previously processed message IDs
+    var rawData = PropertiesService.getScriptProperties().getProperty('processedMessageIds');
+    var processedMap = rawData ? JSON.parse(rawData) : {};
+
+    // Define cutoff time (30 days ago) and clean up old entries
+    var now = new Date();
+    var cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    for (var id in processedMap) {
+      if (new Date(processedMap[id]) < cutoff) {
+        delete processedMap[id];
+      }
+    }
+
+    // Regex that handles newlines, spacing, and merchant names with special characters
+    var regex = /ending (\d{4})[\s\S]*?for Rs ([\d,]+\.\d{2})[\s\S]*?at[\s\S]*?([\s\S]+?)\s+on (\d{2}-\d{2}-\d{4}) (\d{2}:\d{2}:\d{2})/;
+
+    threadsToProcess.forEach(function(thread, tIndex) {
+      Logger.log("Processing thread " + (tIndex + 1));
+      var messages = thread.getMessages();
+
+      messages.forEach(function(message, mIndex) {
+        var messageId = String(message.getId());
+        var senderEmail = message.getFrom();
+        var subject = message.getSubject();
+        var timestamp = message.getDate();
+        var body = message.getPlainBody();
+
+        Logger.log("Encountered message ID: " + messageId);
+
+        if (processedMap[messageId]) {
+          Logger.log("Message already processed: " + messageId);
+          return;
+        }
+
+        Logger.log("Processing message " + (mIndex + 1));
+
+        var match = body.match(regex);
+
+        if (match) {
+          var cardNumber = match[1];
+          var amount = match[2].replace(/,/g, '');
+          var merchant = match[3].replace(/\s+/g, ' ').trim();
+          var date = match[4];
+          var time = match[5];
+
+          Logger.log(`Matched - Card: ${cardNumber}, Amount: ${amount}, Merchant: ${merchant}, Date: ${date}, Time: ${time}`);
+          
+          // Log the processed email to the sheet
+          sheet.appendRow([messageId, timestamp, senderEmail, subject, "Matched", "Card: " + cardNumber + ", Amount: " + amount]);
+
+          // Save this message ID with the current timestamp
+          processedMap[messageId] = now.toISOString();
+        } else {
+          Logger.log("No match found in message body:\n" + body);
+          
+          // Log that no match was found and the details of what did not match
+          var noMatchDetails = "Pattern did not match the expected transaction format.";
+          sheet.appendRow([messageId, timestamp, senderEmail, subject, "Not Matched", noMatchDetails]);
+        }
+
+        message.markRead(); // Optional
+      });
+    });
+
+    // Save updated list of processed message IDs
+    PropertiesService.getScriptProperties().setProperty('processedMessageIds', JSON.stringify(processedMap));
+    Logger.log("Processed message IDs saved: " + Object.keys(processedMap).length);
+
+  } catch (e) {
+    Logger.log("Error: " + e.toString());
+  }
+}
